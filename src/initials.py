@@ -1,9 +1,8 @@
-from scipy.interpolate import griddata
-from skimage.io import imread
+from skimage.color import rgb2gray
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage.io import imread
-from scipy.interpolate import interp2d
+from skimage.io import imread, imsave
+from colour_demosaicing import demosaicing_CFA_Bayer_bilinear
 
 
 image = imread('../dcraw/baby.tiff')
@@ -17,122 +16,205 @@ print(f"Width: {width} pixels, Height: {
 # Convert the image to a double-precision floating-point array
 image_double = image.astype(np.float64)
 
-# Optionally, you can print out some information about the conversion if necessary
 print(f"Converted image dtype: {image_double.dtype}")
 
-# Constants from the RAW image conversion
+# Constants from RAW image conversion
 black = 0
 white = 16383
 multipliers = [1.628906, 1.000000, 1.386719, 1.000000]  # Not used in this part
 
-# Linearize the image
+# Linearize
 linearized_image = (image_double - black) / (white - black)
 linearized_image = np.clip(linearized_image, 0, 1)
 
-
-# Assuming 'image' is your raw image loaded as a 2D numpy array
 top_left_2x2 = linearized_image[0:2, 0:2]
 
-# For now, let's print this out to see the raw values
 print("Top-left 2x2 pixel values:\n", top_left_2x2)
 
-# Initialize empty channels based on half the size, since RGGB takes 2x2 for a full color pixel
-red_channel = np.zeros((height // 2, width // 2))
-green_channel = np.zeros((height // 2, width // 2))
-blue_channel = np.zeros((height // 2, width // 2))
 
-# Extracting the channels based on RGGB pattern
-red_channel = image[0::2, 0::2]
-green_channel = (image[0::2, 1::2] + image[1::2, 0::2]) / 2
-blue_channel = image[1::2, 1::2]
+def apply_white_world(image):
+    copy = image.copy()
 
+    max_red = np.max(image[0::2, 0::2])
+    max_green = max([np.max(image[0::2, 1::2]), np.max(image[1::2, 0::2])])
+    max_blue = np.max(image[1::2, 1::2])
 
-def white_world_balancing(red, green, blue):
-    # Find the maximum value among all channels
-    max_value = np.max([red.max(), green.max(), blue.max()])
-    return red / max_value, green / max_value, blue / max_value
+    copy[0::2, 0::2] /= max_red
+    copy[0::2, 1::2] /= max_green
+    copy[1::2, 0::2] /= max_green
+    copy[1::2, 1::2] /= max_blue
 
-
-def gray_world_balancing(red, green, blue):
-    # Calculate the average for each channel
-    avg_r = np.mean(red)
-    avg_g = np.mean(green)
-    avg_b = np.mean(blue)
-    avg_gray = (avg_r + avg_g + avg_b) / 3
-    # Scale each channel by the global average divided by the channel average
-    return (red * avg_gray / avg_r), (green * avg_gray / avg_g), (blue * avg_gray / avg_b)
+    return copy
 
 
-def custom_white_balancing(red, green, blue, r_scale, g_scale, b_scale):
-    # Apply the provided scale to each channel
-    return red * r_scale, green * g_scale, blue * b_scale
+def apply_gray_world(image):
+    copy = image.copy()
+    mean_red = np.mean(image[0::2, 0::2])
+    mean_green = np.mean((image[0::2, 1::2] + image[1::2, 0::2]) / 2)
+    mean_blue = np.mean(image[1::2, 1::2])
+    total_avg = (mean_red + mean_green + mean_blue) / 3
+    copy[0::2, 0::2] *= total_avg/mean_red
+    copy[0::2, 1::2] *= total_avg/mean_green
+    copy[1::2, 0::2] *= total_avg/mean_green
+    copy[1::2, 1::2] *= total_avg/mean_blue
+
+    return copy
 
 
-# Multipliers from RAW conversion
-r_scale, g_scale, b_scale = 1.628906, 1.000000, 1.386719
+def apply_camera_presets(image, multipliers):
+    copy = image.copy()
 
-# Applying each white balancing method
-red_ww, green_ww, blue_ww = white_world_balancing(
-    red_channel, green_channel, blue_channel)
-red_gw, green_gw, blue_gw = gray_world_balancing(
-    red_channel, green_channel, blue_channel)
-red_custom, green_custom, blue_custom = custom_white_balancing(
-    red_channel, green_channel, blue_channel, r_scale, g_scale, b_scale)
+    copy[0::2, 0::2] *= multipliers[0]
+    copy[1::2, 1::2] *= multipliers[2]
+    print(copy.shape)
+    return copy
 
 
-def normalize_and_combine(red, green, blue):
-    # Stack the channels along the third dimension
-    combined_image = np.stack((red, green, blue), axis=-1)
-
-    # Normalize or clip the image to be in the range [0, 1]
-    combined_image = np.clip(combined_image, 0, 1)
-
-    return combined_image
+white_world_balanced = apply_white_world(linearized_image)
+gray_world_balanced = apply_gray_world(linearized_image)
+camera_presets_balanced = apply_camera_presets(linearized_image, multipliers)
 
 
-# Apply the white balancing techniques
-# Note: Assuming red_channel, green_channel, blue_channel are correctly extracted from the original image
-image_ww = normalize_and_combine(red_ww, green_ww, blue_ww)
+def display(image):
+    return np.clip(image * 5, 0, 1)
+
+# Uncomment to plot white balancing images
+
+# fig, ax = plt.subplots(1, 4, figsize=(15, 5))
+# ax[0].imshow(display(linearized_image), cmap='gray')
+# ax[0].set_title('Original')
+# ax[1].imshow(display(white_world_balanced), cmap='gray')
+# ax[1].set_title('White World Balanced')
+# ax[2].imshow(display(gray_world_balanced), cmap='gray')
+# ax[2].set_title('Gray World Balanced')
+# ax[3].imshow(display(camera_presets_balanced), cmap='gray')
+# ax[3].set_title('Camera Presets Balanced')
+# plt.savefig('white_balancing.png')
+# plt.show()
 
 
-def normalize_image(image):
-    # Normalize the image to have values between 0 and 1
-    max_val = np.max(image)
-    min_val = np.min(image)
-    normalized_image = (image - min_val) / (max_val - min_val)
-    return normalized_image
+ww_demosaicing = demosaicing_CFA_Bayer_bilinear(white_world_balanced, 'RGGB')
+gw_demosaicing = demosaicing_CFA_Bayer_bilinear(gray_world_balanced, 'RGGB')
+cp_demosaicing = demosaicing_CFA_Bayer_bilinear(
+    camera_presets_balanced, 'RGGB')
+
+# Uncomment to plot demosaicing images
+
+# fig, ax = plt.subplots(1, 4, figsize=(15, 5))
+# ax[0].imshow(display(linearized_image), cmap='gray')
+# ax[0].set_title('Original Demosaiced')
+# ax[1].imshow(display(ww_demosaicing), cmap='gray')
+# ax[1].set_title('White World Balanced Demosaiced')
+# ax[2].imshow(display(gw_demosaicing), cmap='gray')
+# ax[2].set_title('Gray World Balanced Demosaiced')
+# ax[3].imshow(display(cp_demosaicing), cmap='gray')
+# ax[3].set_title('Camera Presets Balanced Demosaiced')
+# plt.savefig('demosaicing.png')
+# plt.show()
+
+# BEST DEMOSAICED IMAGE
+demosaiced_image = cp_demosaicing
 
 
-# Combine the white balanced channels and normalize them
-image_ww_combined = np.dstack((red_ww, green_ww, blue_ww))
-image_ww_normalized = normalize_image(image_ww_combined)
+# The given 1x9 vector
+vector_MXYZ_to_cam = np.array(
+    [6988, -1384, -714, -5631, 13410, 2447, -1485, 2204, 7318])
 
-image_gw_combined = np.dstack((red_gw, green_gw, blue_gw))
-image_gw_normalized = normalize_image(image_gw_combined)
+# Reshape and scale
+MXYZ_to_cam = vector_MXYZ_to_cam.reshape((3, 3)) / 10000.0
 
-image_custom_combined = np.dstack((red_custom, green_custom, blue_custom))
-image_custom_normalized = normalize_image(image_custom_combined)
+# Given MsRGB_to_XYZ
+MsRGB_to_XYZ = np.array([
+    [0.4124564, 0.3575761, 0.1804375],
+    [0.2126729, 0.7151522, 0.0721750],
+    [0.0193339, 0.1191920, 0.9503041]
+])
 
-# Visualization
+# Compute MsRGB_to_cam
+MsRGB_to_cam = np.dot(MXYZ_to_cam, MsRGB_to_XYZ)
 
+# Normalize the matrix so that each row sums to 1
+MsRGB_to_cam = MsRGB_to_cam / MsRGB_to_cam.sum(axis=1)[:, np.newaxis]
 
-def visualize_balanced_images(original, ww, gw, custom):
-    fig, axes = plt.subplots(1, 4, figsize=(20, 5))
-    titles = ['Original', 'White World', 'Gray World', 'Custom White Balance']
-    images = [original, ww, gw, custom]
-
-    for ax, img, title in zip(axes, images, titles):
-        ax.imshow(img)
-        ax.set_title(title)
-        ax.axis('off')
-
-    plt.tight_layout()
-    plt.show()
+# Compute the inverse of MsRGB_to_cam
+MsRGB_to_cam_inv = np.linalg.inv(MsRGB_to_cam)
 
 
-# Assuming 'linearized_image' needs to be normalized for display as well
-linearized_normalized = normalize_image(linearized_image)
+# Function to apply color space transformation to the image
+def apply_color_space_correction(image, transformation_matrix):
 
-# Display the images
-visualize_balanced_images(linearized_normalized, image_ww_normalized,
-                          image_gw_normalized, image_custom_normalized)
+    flat_image = image.reshape((-1, 3))
+
+    corrected_colors = np.dot(flat_image, transformation_matrix.T)
+
+    corrected_image = corrected_colors.reshape(image.shape)
+    # Clip values to be within a valid range
+    corrected_image = np.clip(corrected_image, 0, 1)
+    return corrected_image
+
+
+corrected_image = apply_color_space_correction(
+    demosaiced_image, MsRGB_to_cam_inv)
+
+# Plot the color corrected image
+
+# Plotting the corrected image
+# plt.imshow(display(corrected_image))
+# plt.title('Color Space Corrected Image')
+# plt.savefig('color_corrected_image.png')
+# plt.show()
+
+
+# Function to adjust brightness
+def adjust_brightness(image, target_mean=0.25):
+
+    gray_image = rgb2gray(image)
+    current_mean = np.mean(gray_image)
+    scale_factor = target_mean / current_mean
+    # Brighten the image by scaling
+
+    brightened_image = image * scale_factor
+
+    # Clip values to be in the range [0, 1]
+    brightened_image = np.clip(brightened_image, 0, 1)
+    return brightened_image
+
+# Function for gamma encoding
+
+
+def gamma_encode(image):
+    # Define the sRGB gamma encoding function
+    def srgb_gamma(c):
+        if c <= 0.0031308:
+            return 12.92 * c
+        else:
+            return 1.055 * (c ** (1/2.4)) - 0.055
+
+    # Apply the gamma function to each channel
+    gamma_encoded_image = np.vectorize(srgb_gamma)(image)
+    return gamma_encoded_image
+
+
+# Adjust brightness
+brightened_image = adjust_brightness(corrected_image, target_mean=0.25)
+
+# Apply gamma encoding
+gamma_encoded_image = gamma_encode(brightened_image)
+final_save = (gamma_encoded_image * 255).astype(np.uint8)
+print("corrected type", final_save.dtype)
+
+# Display the final image
+
+
+# plt.imshow(gamma_encoded_image)
+# plt.title('Gamma Encoded and Brightness Adjusted Image')
+# plt.savefig('Gamma Encoded and Brightness Adjusted Image.png')
+# plt.show()
+
+
+# Save the final image
+
+
+# imsave('final_image.png', final_save)
+# imsave('final_image_30%.jpg', final_save, quality=30)
+# print("Image saved")
